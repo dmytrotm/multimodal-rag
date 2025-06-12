@@ -1,0 +1,9 @@
+.env
+/venv/
+/env/
+/__pycache__/
+/batch_images/
+/output/
+chroma_db_worker*
+docstore_worker*
+*test*
