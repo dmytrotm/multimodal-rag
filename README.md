@@ -402,7 +402,7 @@ project/
 │   │   └── def456_image2.png
 │   └── issue-124/
 │       └── ghi789_image3.webp
-├── batch_scraper.py           # Main scraper code
+├── scraper.py           # Main scraper code
 ├── data_processor.py          # RAG processing code
 ├── retriever.py      # Parallel processing engine
 └── requirements.txt           # Python dependencies
