@@ -27,22 +27,7 @@ import requests
 # Suppress common warnings for a cleaner output
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-
 class DataProcessor:
-    """
-    Args:
-        output_dir (str, optional): Directory containing the scraped JSON files. 
-            If None, only direct JSON processing is available.
-        vectorstore_path (str): Path to persist the Chroma vector database.
-        docstore_path (str): Path for the local file document store.
-        google_api_key (Optional[str]): Google API key. If None, it's read
-            from the "GOOGLE_API_KEY" environment variable.
-        chunk_size (int): Size of text chunks for splitting long documents.
-        chunk_overlap (int): Overlap between text chunks.
-        use_vision_model (bool): Whether to use the vision model for images.
-        verbose (bool): If True, prints detailed logs during processing.
-    """
-
     def __init__(self,
              output_dir=None,
              vectorstore_path="./chroma_db_final",
@@ -448,7 +433,7 @@ Provide a practical description, not a list of potential AI applications."""},
         except Exception as e:
             self._log(f"Could not generate text summary: {e}", "error")
             return text[:300].strip() + '...'
-
+    
     def _generate_image_summary(self, image_path, alt_text, caption):
         """Generates a summary for an image, using Vision model if enabled."""
         if self.use_vision_model and self.vision_llm:
@@ -879,22 +864,23 @@ Provide a practical description, not a list of potential AI applications."""},
 
     def _get_documents_safely(self, query, k):
         """
-        Safely retrieve documents with fallback mechanisms.
+        Safely retrieve documents with fallback mechanisms and reranking.
         
         Args:
             query: Search query
             k: Number of documents to retrieve
             
         Returns:
-            List of Document objects
+            List of Document objects, reranked by relevance
         """
         documents = []
+        # Retrieve more candidates for reranking (but cap at reasonable limit)
+        initial_k = min(k * 3, 50)
         
         # Try multi-vector retriever first
         try:
-            # FIX: Configure the retriever's search_kwargs properly
-            # MultiVectorRetriever uses get_relevant_documents with search_kwargs
-            self.retriever.search_kwargs = {"k": k}
+            # Configure the retriever to get more initial candidates
+            self.retriever.search_kwargs = {"k": initial_k}
             raw_docs = self.retriever.get_relevant_documents(query)
             
             for doc_data in raw_docs:
@@ -907,14 +893,112 @@ Provide a practical description, not a list of potential AI applications."""},
             
             # Fallback to direct similarity search on vectorstore
             try:
-                documents = self.vectorstore.similarity_search(query, k=k)
+                documents = self.vectorstore.similarity_search(query, k=initial_k)
                 self._log("Using similarity search results (summaries only)", "info")
             except Exception as e2:
                 self._log(f"Similarity search also failed: {e2}", "error")
                 raise Exception(f"Both retrieval methods failed. Multi-vector: {e}, Similarity: {e2}")
         
+        # Apply reranking if we have more documents than needed
+        if len(documents) > k:
+            self._log(f"Reranking {len(documents)} documents to select top {k}", "processing")
+            documents = self._rerank_documents(query, documents, k)
+        
         # Ensure we don't return more than k documents
         return documents[:k]
+
+    def _rerank_documents(self, query, documents, top_k):
+        """
+        Rerank documents using LLM-based relevance scoring.
+        
+        Args:
+            query: The search query
+            documents: List of Document objects to rerank
+            top_k: Number of top documents to return
+            
+        Returns:
+            List of reranked Document objects
+        """
+        if len(documents) <= top_k:
+            return documents
+        
+        try:
+            # Create reranking prompt
+            rerank_prompt = ChatPromptTemplate.from_template(
+                """You are a relevance scorer for search results. Rate how well this document answers the user's query.
+
+    Query: {query}
+
+    Document Content: {content}
+
+    Document Metadata: {metadata}
+
+    Rate the relevance on a scale of 1-10 where:
+    - 10: Perfectly answers the query with specific, detailed information
+    - 7-9: Highly relevant with good information
+    - 4-6: Somewhat relevant but missing key details
+    - 1-3: Barely relevant or off-topic
+
+    Consider:
+    - How directly the content addresses the query
+    - Specificity and depth of information
+    - Recency and context relevance
+
+    Return only the numeric score (1-10):"""
+            )
+            
+            # Score each document
+            scored_docs = []
+            rerank_chain = rerank_prompt | self.text_llm | StrOutputParser()
+            
+            for doc in documents:
+                try:
+                    # Prepare metadata string for context
+                    metadata_str = ", ".join([f"{k}: {v}" for k, v in doc.metadata.items() 
+                                            if k not in ['doc_id'] and v])
+                    
+                    # Get relevance score
+                    score_response = self._execute_api_call(
+                        lambda: rerank_chain.invoke({
+                            "query": query,
+                            "content": doc.page_content[:1000],  # Limit content length
+                            "metadata": metadata_str
+                        }),
+                        'text'
+                    )
+                    
+                    # Extract numeric score
+                    try:
+                        score = float(score_response.strip())
+                        # Clamp score to valid range
+                        score = max(1, min(10, score))
+                    except ValueError:
+                        # Fallback score if parsing fails
+                        self._log(f"Could not parse score '{score_response}', using default", "warning")
+                        score = 5.0
+                    
+                    scored_docs.append((doc, score))
+                    
+                except Exception as e:
+                    self._log(f"Error scoring document: {e}", "warning")
+                    # Assign neutral score if scoring fails
+                    scored_docs.append((doc, 5.0))
+            
+            # Sort by score (highest first) and return top_k
+            scored_docs.sort(key=lambda x: x[1], reverse=True)
+            reranked_docs = [doc for doc, score in scored_docs[:top_k]]
+            
+            if self.verbose:
+                self._log("Reranking scores:", "stats")
+                for i, (doc, score) in enumerate(scored_docs[:top_k]):
+                    content_preview = doc.page_content[:100].replace('\n', ' ')
+                    self._log(f"  [{i+1}] Score: {score:.1f} - {content_preview}...", "stats")
+            
+            return reranked_docs
+            
+        except Exception as e:
+            self._log(f"Reranking failed: {e}. Returning original order.", "warning")
+            return documents[:top_k]
     
     def _deserialize_document(self, doc_data):
             """

@@ -3,10 +3,8 @@ import os
 from pathlib import Path
 from PIL import Image
 
-
-# Import your RAG processor
 try:
-    from data_processor import DataProcessor  # Adjust import based on your file name
+    from data_processor import DataProcessor 
 except ImportError:
     st.error("Please ensure your RAG processor code is in a file named 'data_processor.py' or update the import statement.")
     st.stop()
@@ -74,7 +72,7 @@ def main():
     num_results = st.slider("Number of results to retrieve:", 1, 10, 5)
     
     # Search button
-    if st.button("🔍 Search", type="primary") or query:
+    if st.button("🔍 Search", type="primary"):
         if query.strip():
             with st.spinner("Searching..."):
                 try:
@@ -121,7 +119,7 @@ def main():
                                         
                                         st.markdown('</div>', unsafe_allow_html=True)
                     
-                    # Optional: Show sources in an expandable section
+                    # Show sources in an expandable section
                     sources = result.get('sources', [])
                     if sources:
                         with st.expander(f"📚 Sources ({len(sources)})", expanded=False):
